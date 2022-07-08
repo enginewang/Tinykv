@@ -107,20 +107,26 @@ func (rn *RawNode) Propose(data []byte) error {
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		From:    rn.Raft.id,
-		Entries: []*pb.Entry{{Data: data}}})
+		Entries: []*pb.Entry{
+			{Data: data},
+		}})
 }
 
 // ProposeConfChange proposes a config change.
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
-	data, err := cc.Marshal()
+	m, err := confChangeToMsg(cc)
 	if err != nil {
 		return err
 	}
-	ent := pb.Entry{EntryType: pb.EntryType_EntryConfChange, Data: data}
-	return rn.Raft.Step(pb.Message{
-		MsgType: pb.MessageType_MsgPropose,
-		Entries: []*pb.Entry{&ent},
-	})
+	return rn.Raft.Step(m)
+}
+
+func confChangeToMsg(c pb.ConfChange) (pb.Message, error) {
+	data, err := c.Marshal()
+	if err != nil {
+		return pb.Message{}, err
+	}
+	return pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{EntryType: pb.EntryType_EntryConfChange, Data: data}}}, nil
 }
 
 // ApplyConfChange applies a config change to the local node.
@@ -151,24 +157,30 @@ func (rn *RawNode) Step(m pb.Message) error {
 	return ErrStepPeerNotFound
 }
 
-// Ready returns the current point-in-time state of this RawNode.
-func (rn *RawNode) Ready() Ready {
-	// Your Code Here (2A).
-	r := rn.Raft
+func newReady(r *Raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
 	rd := Ready{
 		Entries:          r.RaftLog.unstableEntries(),
 		CommittedEntries: r.RaftLog.nextEnts(),
 		Messages:         r.msgs,
 	}
-
-	if softSt := r.softState(); !softSt.equal(rn.prevSoftSt) {
-		rn.prevSoftSt = softSt
+	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
 		rd.SoftState = softSt
 	}
-	if hardSt := r.hardState(); !isHardStateEqual(hardSt, rn.prevHardSt) {
+	if hardSt := r.hardState(); !isHardStateEqual(hardSt, prevHardSt) {
 		rd.HardState = hardSt
 	}
-	rn.Raft.msgs = make([]pb.Message, 0)
+	return rd
+}
+
+// Ready returns the current point-in-time state of this RawNode.
+func (rn *RawNode) Ready() Ready {
+	// Your Code Here (2A).
+	r := rn.Raft
+	rd := newReady(r, rn.prevSoftSt, rn.prevHardSt)
+	if rd.SoftState != nil {
+		rn.prevSoftSt = rd.SoftState
+	}
+	rn.Raft.msgs = nil
 	return rd
 }
 
@@ -176,15 +188,13 @@ func (rn *RawNode) Ready() Ready {
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	r := rn.Raft
+	if !r.softState().equal(rn.prevSoftSt) {
+		return true
+	}
 	if hardSt := r.hardState(); !IsEmptyHardState(hardSt) && !isHardStateEqual(hardSt, rn.prevHardSt) {
 		return true
 	}
-	if len(r.RaftLog.unstableEntries()) > 0 ||
-		len(r.RaftLog.nextEnts()) > 0 ||
-		len(r.msgs) > 0 {
-		return true
-	}
-	if !IsEmptySnap(r.RaftLog.pendingSnapshot) {
+	if len(r.msgs) > 0 || len(r.RaftLog.unstableEntries()) > 0 || len(r.RaftLog.nextEnts()) > 0 {
 		return true
 	}
 	return false
